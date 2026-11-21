@@ -154,3 +154,78 @@ export async function handlePmhSheetCoupon(params: {
     console.info(`[pmhSheetCoupon] Phát mã "${couponCode}" (${loaiPMH}) cho ${params.displayName}`);
     return { couponCode, loaiPMH, maKho, mdh };
 }
+
+export function buildPmhSheetFlexMessage(params: {
+    displayName: string;
+    loaiPMH: string;
+    couponCode: string;
+    maKho?: string;
+    mdh?: string;
+}) {
+    const cleanName = (params.displayName || 'Bạn').replace(/^[@👤\s]+/, '').trim();
+    const cleanCode = String(params.couponCode || '').trim();
+    const label = params.loaiPMH.toUpperCase();
+
+    const bodyContents: any[] = [
+        {
+            type: 'box', layout: 'horizontal',
+            contents: [{
+                type: 'text', text: `@${cleanName}`,
+                weight: 'bold', size: 'xs', color: '#0284C7', wrap: true
+            }]
+        },
+        {
+            type: 'box', layout: 'vertical', margin: 'xs',
+            backgroundColor: '#F8FAFC', cornerRadius: 'md', paddingAll: '7px',
+            contents: [
+                { type: 'text', text: `🛍️ PMH ${label}`, size: 'xs', color: '#1E293B', weight: 'bold', wrap: true },
+                ...(params.mdh ? [{
+                    type: 'box', layout: 'baseline', margin: 'xs', spacing: 'sm',
+                    contents: [
+                        { type: 'text', text: 'MĐH:', color: '#64748B', size: 'xxs', flex: 2 },
+                        { type: 'text', text: params.mdh, color: '#0F172A', size: 'xs', weight: 'bold', flex: 8 }
+                    ]
+                }] : []),
+                ...(params.maKho ? [{
+                    type: 'box', layout: 'baseline', margin: 'xs', spacing: 'sm',
+                    contents: [
+                        { type: 'text', text: 'Kho:', color: '#64748B', size: 'xxs', flex: 2 },
+                        { type: 'text', text: params.maKho, color: '#0F172A', size: 'xs', weight: 'bold', flex: 8 }
+                    ]
+                }] : [])
+            ]
+        },
+        {
+            type: 'box', layout: 'vertical', margin: 'md',
+            backgroundColor: '#06C755', cornerRadius: 'lg',
+            paddingTop: '10px', paddingBottom: '10px', paddingStart: '12px', paddingEnd: '12px',
+            action: { type: 'clipboard', label: 'Chạm để copy', clipboardText: cleanCode },
+            contents: [{
+                type: 'text', text: '➜ Chạm để copy',
+                weight: 'bold', size: 'md', color: '#FFFFFF', align: 'center'
+            }]
+        }
+    ];
+
+    return {
+        type: 'flex',
+        altText: `🎁 PMH ${label} — ${cleanName}`,
+        contents: {
+            type: 'bubble', size: 'mega',
+            header: {
+                type: 'box', layout: 'horizontal',
+                backgroundColor: '#0EA5E9', paddingAll: '10px', alignItems: 'center',
+                contents: [
+                    { type: 'text', text: `🎁 PMH ${label}`, color: '#FFFFFF', weight: 'bold', size: 'sm', flex: 1 },
+                    {
+                        type: 'box', layout: 'vertical',
+                        backgroundColor: '#FFFFFF', cornerRadius: 'md',
+                        paddingStart: '8px', paddingEnd: '8px', paddingTop: '2px', paddingBottom: '2px', flex: 0,
+                        contents: [{ type: 'text', text: cleanCode, color: '#0EA5E9', weight: 'bold', size: 'xxs' }]
+                    }
+                ]
+            },
+            body: { type: 'box', layout: 'vertical', paddingAll: '12px', contents: bodyContents }
+        }
+    };
+}

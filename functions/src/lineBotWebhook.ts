@@ -16,7 +16,7 @@ import { extractBareCouponCode, buildCouponStatusReply } from './couponLookup';
 import { getGroupFeatures, type GroupFeatures, type GroupFeatureKey } from './groupFeatureHelper';
 import { allocatePmhSequence, formatPmhLabel, buildCouponUsedText, couponKind } from './pmhSequence';
 import { enqueuePmhRelay } from './pmhRelay';
-import { isPmhSheetGroup, looksLikePmhSheetForm, handlePmhSheetCoupon } from './pmhSheetCoupon';
+import { isPmhSheetGroup, looksLikePmhSheetForm, handlePmhSheetCoupon, buildPmhSheetFlexMessage } from './pmhSheetCoupon';
 import { laIdDocHopLe } from './firestoreDocId';
 import { moTaLoiLine, laHetHanMuc } from './lineErrors';
 import { layHanMuc, uocTinhNotifyCuaBot } from './lineQuota';
@@ -3955,16 +3955,13 @@ export const lineBotWebhook = onRequest(
                             quoteToken: event.message?.quoteToken,
                         });
                         if (result) {
-                            const flexMsg = createCouponFlexMessage({
+                            const flexMsg = buildPmhSheetFlexMessage({
                                 displayName,
-                                productName: result.loaiPMH,
-                                categoryLabel: result.loaiPMH,
-                                code: result.couponCode,
-                                orderId: result.mdh || undefined,
-                                warehouse: result.maKho || undefined,
-                                liffId: (config as any).liffId,
+                                loaiPMH: result.loaiPMH,
+                                couponCode: result.couponCode,
+                                maKho: result.maKho || undefined,
+                                mdh: result.mdh || undefined,
                             });
-                            signLiffUris(flexMsg, uid, config.channelSecret);
                             await replyLineMessage(token, replyToken, [flexMsg]);
                             console.info(`[pmhSheetCoupon] Đã reply Flex mã ${result.couponCode} cho ${displayName} trong group ${groupId}`);
                             continue;
