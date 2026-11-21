@@ -5,16 +5,14 @@
 import { withSecrets, botsWithSecrets, canCallerUseBot, SECRET_KEYS, BOT_SECRETS_COL } from './lineBotSecrets';
 import { onRequest } from 'firebase-functions/v2/https';
 import { verifyLineSignature } from './lineSignature';
-import { signLiffUris, verifyLiffTicket, LEGACY_LIFF_UNTIL } from './liffTicket';
 import * as crypto from 'crypto';
 import { db, auth as adminAuth } from './firebaseAdmin';
 import { FieldPath } from 'firebase-admin/firestore';
 import { isRelistUnusedCommand, getVnMonthStartIso, selectUnusedThisMonth } from './relistUnused';
-import { formatShortUserName } from './userName';
 import { isStrictPmhRequestForm } from './pmhForm';
 import { extractBareCouponCode, buildCouponStatusReply } from './couponLookup';
 import { getGroupFeatures, type GroupFeatures, type GroupFeatureKey } from './groupFeatureHelper';
-import { allocatePmhSequence, formatPmhLabel, buildCouponUsedText, couponKind } from './pmhSequence';
+import { allocatePmhSequence, formatPmhLabel, couponKind } from './pmhSequence';
 import { enqueuePmhRelay } from './pmhRelay';
 import { isPmhSheetGroup, looksLikePmhSheetForm, handlePmhSheetCoupon, buildPmhSheetFlexMessage } from './pmhSheetCoupon';
 import { laIdDocHopLe } from './firestoreDocId';
@@ -1685,7 +1683,7 @@ function parsePmhBlockDetails(block: string): {
 /**
  * Lọc các khối PMH theo tên và format kết quả trả về (Rút gọn & gôm theo người nhận)
  */
-function filterPmhByUsers(text: string, candidateNames: string[], liffId?: string): {
+function filterPmhByUsers(text: string, candidateNames: string[]): {
     totalBlocks: number;
     matchedBlocks: string[];
     replyText: string;
@@ -1828,7 +1826,7 @@ function filterPmhByUsers(text: string, candidateNames: string[], liffId?: strin
     msg += `━━━━━━\n`;
     msg += `💡 Sao chép mã phía trên để sử dụng!`;
 
-    const flexMessages = createFilteredPmhFlexMessages(matchedItemsForFlex, liffId);
+    const flexMessages = createFilteredPmhFlexMessages(matchedItemsForFlex);
 
     return {
         totalBlocks: allBlocks.length,
@@ -2107,9 +2105,7 @@ async function handleIssueCouponByProductName(params: {
             code: cData.code,
             orderId: orderId,
             cardIndex: seqStock > 0 ? seqStock : undefined,
-            liffId: (config as any).liffId
         });
-        signLiffUris(flexMsg, uid, config.channelSecret);
 
         const sendOk = await replyLineMessage(token, replyToken, [flexMsg]);
         if (!sendOk) {
@@ -2345,140 +2341,6 @@ export const lineBotWebhook = onRequest(
                     success: false,
                     error: err.message || 'Không thể kết nối đến máy chủ LINE API'
                 });
-                return;
-            }
-        }
-
-        // 1.5. Action: Đánh dấu coupon đã sử dụng khi người dùng bấm qua LIFF
-        if (action === 'mark-used' || action === 'markUsed') {
-            const code = String(req.body?.code || req.query.code || '').trim().toUpperCase();
-            const usedBy = String(req.body?.usedBy || req.query.usedBy || 'Người dùng LINE').trim();
-            const now = new Date().toISOString();
-
-            if (!code) {
-                res.status(200).json({ success: false, error: 'Thiếu mã coupon' });
-                return;
-            }
-
-            try {
-                // Audit 2026-10-07 (S06): thẻ mới mang vé `b` (bot) + `t` (HMAC Channel Secret) — chỉ chạm
-                // đúng bot đó. Thẻ cũ chưa có vé: giữ cách quét mọi bot tới LEGACY_LIFF_UNTIL rồi từ chối.
-                const botParam = String(req.body?.b || req.query.b || '').trim();
-                const ticket = String(req.body?.t || req.query.t || '').trim();
-                let uids: string[];
-                const tokenByUid = new Map<string, string>();
-                if (botParam || ticket) {
-                    const botSnap = botParam && laIdDocHopLe(botParam) ? await db.collection('line_bots').doc(botParam).get() : null;
-                    const botCfg = botSnap?.exists ? await withSecrets(botParam, botSnap.data()) : null;
-                    if (!botCfg || !verifyLiffTicket(String(botCfg.channelSecret || ''), code, ticket)) {
-                        res.status(403).json({ success: false, error: 'Thẻ coupon không hợp lệ.' });
-                        return;
-                    }
-                    uids = [botParam];
-                    tokenByUid.set(botParam, String(botCfg.channelAccessToken || ''));
-                } else if (Date.now() < LEGACY_LIFF_UNTIL) {
-                    // Tốc độ là ưu tiên (LIFF đang chờ xoay): 1 truy vấn lấy bot → quét SONG SONG cả 2 collection
-                    // của mọi bot → cập nhật USED và push xác nhận SONG SONG → trả lời.
-                    const botsSnap = await db.collection('line_bots').where('active', '==', true).get();
-                    uids = botsSnap.empty
-                        ? (await db.collection('line_bots').limit(5).get()).docs.map(d => d.id)
-                        : botsSnap.docs.map(d => d.id);
-                    for (const { doc: d, config: c } of await botsWithSecrets(botsSnap.docs)) tokenByUid.set(d.id, String(c.channelAccessToken || ''));
-                } else {
-                    res.status(403).json({ success: false, error: 'Thẻ coupon cũ đã hết hạn dùng nút copy. Vui lòng yêu cầu thẻ mới.' });
-                    return;
-                }
-
-                const scans = await Promise.all(uids.flatMap(bUid => [
-                    db.collection('line_bots').doc(bUid).collection('filtered_coupons').where('code', '==', code).get()
-                        .then(snap => ({ bUid, kind: 'filtered' as const, docs: snap.docs })),
-                    db.collection('line_bots').doc(bUid).collection('coupons').where('code', '==', code).get()
-                        .then(snap => ({ bUid, kind: 'stock' as const, docs: snap.docs }))
-                ]));
-
-                let wasAlreadyUsed = false;
-                let wasRevoked = false;
-                let previousUser = '';
-                const toUpdate: FirebaseFirestore.DocumentReference[] = [];
-                // Thẻ lọc đầu tiên vừa chuyển USED có đủ quoteToken + chatId → bot gửi xác nhận trích dẫn thẻ đó
-                let quoteTarget: { bUid: string; chatId: string; quoteToken: string; cardIndex: number; categoryLabel?: string } | null = null;
-                for (const scan of scans) {
-                    for (const docItem of scan.docs) {
-                        const d = docItem.data();
-                        if (d.status === 'USED') {
-                            wasAlreadyUsed = true;
-                            if (d.usedBy && !previousUser) previousUser = d.usedBy;
-                            continue;
-                        }
-                        if (scan.kind === 'stock') {
-                            // Đối với coupon kho tồn: chỉ cho phép chuyển USED khi mã đang ở trạng thái SENT.
-                            // Nếu đã hoàn về UNUSED (do hết 30 phút chờ sao chép), không cho phép nhận nữa.
-                            if (d.status !== 'SENT') {
-                                wasRevoked = true;
-                                continue;
-                            }
-                        }
-                        toUpdate.push(docItem.ref);
-                        if (scan.kind === 'filtered' && !quoteTarget && d.quoteToken && d.chatId) {
-                            quoteTarget = { bUid: scan.bUid, chatId: d.chatId, quoteToken: d.quoteToken, cardIndex: Number(d.cardIndex) || Number(req.body?.index || req.query.index) || 1, categoryLabel: d.categoryLabel || d.type || '' };
-                        }
-                    }
-                }
-                const updatedCount = toUpdate.length;
-                const isDuplicate = wasAlreadyUsed && updatedCount === 0;
-                const isRevoked = !wasAlreadyUsed && wasRevoked && updatedCount === 0;
-
-                // Bot gửi tin xác nhận TRÍCH DẪN thẻ coupon (LIFF sendMessages không hỗ trợ quoteToken —
-                // developers.line.biz/en/reference/liff/#send-messages). Thất bại (hết hạn mức push…) →
-                // quotedSent=false, LIFF tự gửi tin thường thay người dùng như trước.
-                // TẮT HẲN tin xác nhận dùng coupon (chủ dự án chốt 2026-10-15 bỏ push, 2026-10-20 "Tắt tin nhắn xác nhận khi dùng coupon"):
-                // bot không PUSH (tốn hạn mức LINE theo số thành viên nhóm) và trang LIFF cũng không gửi thay — chỉ đánh dấu đã dùng.
-                // Đặt true là bot push lại, nhưng public/liff-copy.html không còn nhánh hiển thị tương ứng.
-                const BOT_TRICH_DAN_COUPON = false;
-                const pushPromise: Promise<{ ok: boolean; status: number; error?: string } | null> = (BOT_TRICH_DAN_COUPON && !isDuplicate && quoteTarget)
-                    ? (async () => {
-                        let botToken = tokenByUid.get(quoteTarget!.bUid) || '';
-                        if (!botToken) {
-                            const botSnap = await db.collection('line_bots').doc(quoteTarget!.bUid).get();
-                            botToken = String((await withSecrets(quoteTarget!.bUid, botSnap.data())).channelAccessToken || '');
-                        }
-                        const timeStr = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Ho_Chi_Minh' });
-                        // Tin xác nhận ghi tên gọn "Mã NV - Tên" (DMST-Nhân-107617SALE -> 107617 - Nhân); Firestore vẫn lưu usedBy đầy đủ.
-                        // Nội dung theo LOẠI thẻ: "PMH 68" / "Coupon Event 68" / "Coupon GVGS 68"
-                        const text = buildCouponUsedText({
-                            categoryLabel: quoteTarget!.categoryLabel,
-                            index: quoteTarget!.cardIndex,
-                            timeStr,
-                            userName: formatShortUserName(usedBy),
-                        });
-                        return pushLineMessage(botToken, quoteTarget!.chatId, [{ type: 'text', text, quoteToken: quoteTarget!.quoteToken }]);
-                    })().catch((e: any) => ({ ok: false, status: 0, error: e?.message || 'push-failed' }))
-                    : Promise.resolve(null);
-
-                const updatePromise = updatedCount > 0
-                    ? (async () => {
-                        const batch = db.batch();
-                        toUpdate.forEach(ref => batch.update(ref, { status: 'USED', usedBy, usedAt: now }));
-                        await batch.commit();
-                    })()
-                    : Promise.resolve();
-
-                const [pushed] = await Promise.all([pushPromise, updatePromise]);
-                const quotedSent = Boolean(pushed?.ok);
-                const quoteError = pushed && !pushed.ok ? (pushed.status === 429 ? 'quota' : pushed.error) : undefined;
-
-                res.status(200).json({
-                    success: true,
-                    updatedCount,
-                    alreadyUsed: isDuplicate,
-                    revoked: isRevoked,
-                    previousUser: previousUser || undefined,
-                    quotedSent,
-                    quoteError
-                });
-                return;
-            } catch (err: any) {
-                res.status(200).json({ success: false, error: err.message });
                 return;
             }
         }
@@ -3198,53 +3060,6 @@ export const lineBotWebhook = onRequest(
                     continue;
                 }
 
-                // 1.8. Kiểm tra tin nhắn xác nhận sử dụng thẻ PMH từ LIFF
-                // Nhận cả câu CŨ ("… đã được sử dụng lúc") lẫn câu MỚI theo loại thẻ
-                // ("👉 Coupon Event 68 sử dụng lúc …") — xem buildCouponUsedText ở pmhSequence.ts.
-                // Bỏ sót ở đây thì mã KHÔNG còn được đánh dấu USED nữa.
-                const isUsedConfirm = cleanText.includes('sử dụng lúc') && cleanText.includes('👉');
-                if (isUsedConfirm) {
-                    // Số thẻ là cụm số NGAY TRƯỚC "sử dụng lúc" — hợp cho "PMH 68",
-                    // "Coupon Event 68", "Coupon GVGS 68" và cả câu cũ "… 68 đã được sử dụng lúc".
-                    // KHÔNG được lấy "số đầu tiên sau 👉": câu "👉 Mã này sử dụng lúc 14:33" sẽ vớ
-                    // phải số GIỜ (14) và đánh dấu nhầm thẻ — test đã bắt đúng lỗi này.
-                    const cardMatch = cleanText.match(/👉[^\n]*?(\d+)\s*(?:đã\s*được\s*)?sử\s*dụng\s*lúc/i);
-                    const matchedCardIndex = (cardMatch && cardMatch[1]) ? Number(cardMatch[1]) : undefined;
-
-                    // Định dạng mới: "↳ User: [Tên]"
-                    const userMatch = cleanText.match(/↳\s*(?:User|Người dùng):\s*(.+)/i);
-                    let matchedUser = userMatch ? userMatch[1].trim() : '';
-
-                    if (!matchedUser) {
-                        // Tương thích ngược: "đã được [Tên] sử dụng lúc"
-                        const oldMatch = cleanText.match(/đã\s*được\s*(.+?)\s*sử\s*dụng\s*lúc/i);
-                        if (oldMatch) {
-                            matchedUser = oldMatch[1].trim();
-                        }
-                    }
-
-                    const now = new Date().toISOString();
-
-                    try {
-                        const fRef = db.collection('line_bots').doc(uid).collection('filtered_coupons');
-                        let q = fRef.where('status', '==', 'UNUSED');
-                        if (matchedCardIndex) {
-                            q = q.where('cardIndex', '==', matchedCardIndex);
-                        }
-                        const fSnap = await q.orderBy('filteredAt', 'desc').limit(1).get();
-                        if (!fSnap.empty) {
-                            await fSnap.docs[0].ref.update({
-                                status: 'USED',
-                                usedBy: matchedUser || 'Người dùng LINE',
-                                usedAt: now
-                            });
-                            console.log(`[Filtered Coupons] Đã đánh dấu USED từ tin nhắn nhóm: PMH ${matchedCardIndex || 1} - ${matchedUser}`);
-                        }
-                    } catch (e) {
-                        console.warn('[Webhook] Cập nhật USED từ tin nhắn thất bại:', e);
-                    }
-                    continue;
-                }
 
                 // 1.9. Lệnh "csd" — hiện lại TẤT CẢ thẻ PMH đã lọc nhưng CHƯA SỬ DỤNG trong tháng này
                 // (thẻ cũ trôi mất trong nhóm, người dùng cần bấm "Chạm để copy" lại). Chỉ lọc theo
@@ -3287,7 +3102,7 @@ export const lineBotWebhook = onRequest(
                         orderId: d.data.orderId ? String(d.data.orderId) : undefined,
                         cardIndex: Number(d.data.cardIndex) || undefined,
                     }));
-                    const flexMessages = signLiffUris(createFilteredPmhFlexMessages(items, (config as any).liffId), uid, config.channelSecret);
+                    const flexMessages = createFilteredPmhFlexMessages(items);
                     const messages: any[] = [...flexMessages];
                     if (unusedDocs.length > MAX_CARDS) {
                         messages.push({
@@ -3296,28 +3111,7 @@ export const lineBotWebhook = onRequest(
                         });
                     }
 
-                    const sent = await replyLineMessageDetailed(token, replyToken, messages);
-                    // Thẻ vừa gửi lại có quoteToken/cardIndex MỚI — cập nhật để LIFF "Chạm để copy" và xác
-                    // nhận trích dẫn trỏ đúng thẻ mới nhất (cùng quy ước với luồng lọc ở mục 3.8).
-                    if (sent.ok && sent.sentMessages.length > 0) {
-                        try {
-                            const qBatch = db.batch();
-                            const chatId = groupId || event.source?.roomId || senderUserId;
-                            shown.forEach((d, idx) => {
-                                const quoteToken = sent.sentMessages[Math.floor(idx / 10)]?.quoteToken;
-                                const patch: Record<string, string | number> = { relistedAt: new Date().toISOString() };
-                                if (quoteToken && chatId) {
-                                    patch.quoteToken = quoteToken;
-                                    patch.chatId = chatId;
-                                    patch.chatType = groupId ? 'group' : (event.source?.roomId ? 'room' : 'user');
-                                }
-                                qBatch.update(d.ref, patch);
-                            });
-                            await qBatch.commit();
-                        } catch (err) {
-                            console.warn('[csd] Lỗi cập nhật quoteToken/cardIndex:', err);
-                        }
-                    }
+                    await replyLineMessage(token, replyToken, messages);
                     console.info(`[csd] Hiện lại ${shown.length}/${unusedDocs.length} thẻ chưa sử dụng tháng ${monthLabel}`);
                     continue;
                 }
@@ -3766,9 +3560,7 @@ export const lineBotWebhook = onRequest(
                         orderId: targetOrderId,
                         warehouse: pData.warehouse,
                         cardIndex: seqApprove > 0 ? seqApprove : undefined,
-                        liffId: (config as any).liffId
                     });
-                    signLiffUris(flexMsg, uid, config.channelSecret);
 
                     await replyLineMessage(token, replyToken, [flexMsg]);
                     continue;
@@ -3794,7 +3586,7 @@ export const lineBotWebhook = onRequest(
                         }
                     }
 
-                    const filterResult = filterPmhByUsers(rawText, candidates, (config as any).liffId);
+                    const filterResult = filterPmhByUsers(rawText, candidates);
 
                     const makeFilteredDocId = (item: { code: string; recipient: string }) =>
                         `${item.code}_${item.recipient}`.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -3867,7 +3659,7 @@ export const lineBotWebhook = onRequest(
 
                     // Danh sách rút gọn (bỏ thẻ trùng) -> phải dựng lại thẻ Flex theo đúng số thứ tự mới
                     const flexMessages = newItems.length > 0
-                        ? signLiffUris(createFilteredPmhFlexMessages(newItems, (config as any).liffId), uid, config.channelSecret)
+                        ? createFilteredPmhFlexMessages(newItems)
                         : [];
 
                     // Tự động lưu các coupon lọc được vào Firestore để Admin theo dõi
@@ -3908,28 +3700,7 @@ export const lineBotWebhook = onRequest(
                     }
 
                     if (flexMessages.length > 0) {
-                        const sent = await replyLineMessageDetailed(token, replyToken, flexMessages);
-                        // Lưu quoteToken của thẻ + chat đích để mark-used (LIFF) cho bot gửi xác nhận TRÍCH DẪN đúng thẻ.
-                        // Thẻ thứ fIdx nằm trong tin nhắn thứ floor(fIdx/10) (carousel gom 10 thẻ/tin, xem createFilteredPmhFlexMessages).
-                        if (sent.ok && sent.sentMessages.length > 0 && newItems.length > 0) {
-                            try {
-                                const qBatch = db.batch();
-                                const chatId = groupId || event.source?.roomId || senderUserId;
-                                newItems.forEach((item, fIdx) => {
-                                    const quoteToken = sent.sentMessages[Math.floor(fIdx / 10)]?.quoteToken;
-                                    if (!quoteToken || !chatId) return;
-                                    const docId = makeFilteredDocId(item);
-                                    qBatch.update(db.collection('line_bots').doc(uid).collection('filtered_coupons').doc(docId), {
-                                        quoteToken,
-                                        chatId,
-                                        chatType: groupId ? 'group' : (event.source?.roomId ? 'room' : 'user')
-                                    });
-                                });
-                                await qBatch.commit();
-                            } catch (err) {
-                                console.warn('[Filtered Coupons] Lỗi lưu quoteToken:', err);
-                            }
-                        }
+                        await replyLineMessage(token, replyToken, flexMessages);
                     } else if (filterResult.matchedBlocks.length > 0 || !isGroupOrRoom || isExplicitFilter) {
                         await replyLineMessage(token, replyToken, [
                             {
@@ -4174,9 +3945,7 @@ export const lineBotWebhook = onRequest(
                             warehouse: parsed.warehouse,
                             warningSuffix,
                             cardIndex: seqForm > 0 ? seqForm : undefined,
-                            liffId: (config as any).liffId
                         });
-                        signLiffUris(flexMsg, uid, config.channelSecret);
 
                         await replyLineMessage(token, replyToken, [flexMsg]);
                         continue;

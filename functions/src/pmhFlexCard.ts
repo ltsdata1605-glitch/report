@@ -2,7 +2,7 @@ import { formatPmhLabel } from './pmhSequence';
 
 /**
  * Tạo LINE Flex Message Card cấp mã coupon
- * Tích hợp action: 'uri' mở LIFF để tự động copy mã coupon
+ * Dùng clipboard action — bấm nút copy mã trực tiếp, không cần LIFF
  */
 export function createCouponFlexBubble(params: {
     displayName: string;
@@ -12,7 +12,6 @@ export function createCouponFlexBubble(params: {
     orderId?: string;
     warehouse?: string;
     warningSuffix?: string;
-    liffId?: string;
     cardIndex?: number;
     totalCards?: number;
     /** Thẻ đến từ đâu: 'filter' = lọc danh sách PMH dán vào nhóm → tiêu đề "LỌC PMH {loại}"; 'stock' = cấp mã từ kho → tiêu đề "MÃ COUPON {loại}". */
@@ -89,7 +88,7 @@ export function createCouponFlexBubble(params: {
                 }] : [])
             ]
         },
-        // Nút "Chạm để copy" nền xanh đặc
+        // Nút "Chạm để copy" nền xanh đặc — clipboard action
         {
             type: 'box',
             layout: 'vertical',
@@ -101,9 +100,9 @@ export function createCouponFlexBubble(params: {
             paddingStart: '12px',
             paddingEnd: '12px',
             action: {
-                type: 'uri',
+                type: 'clipboard',
                 label: 'Chạm để copy',
-                uri: `https://liff.line.me/${params.liffId || '2011679071-BclvutpD'}?code=${encodeURIComponent(cleanCode)}&type=${encodeURIComponent(params.categoryLabel)}&index=${cardIndexNum}&reqBy=${encodeURIComponent(cleanName)}&prod=${encodeURIComponent(params.productName || '')}`
+                clipboardText: cleanCode
             },
             contents: [
                 {
@@ -184,7 +183,6 @@ export function createCouponFlexMessage(params: {
     orderId?: string;
     warehouse?: string;
     warningSuffix?: string;
-    liffId?: string;
     cardIndex?: number;
     totalCards?: number;
 }) {
@@ -207,7 +205,7 @@ export function createFilteredPmhFlexMessages(matchedItems: Array<{
     orderId?: string;
     warningSuffix?: string;
     cardIndex?: number;
-}>, liffId?: string): any[] {
+}>): any[] {
     if (!matchedItems || matchedItems.length === 0) return [];
 
     const bubbles = matchedItems.map((item, idx) => createCouponFlexBubble({
@@ -217,7 +215,6 @@ export function createFilteredPmhFlexMessages(matchedItems: Array<{
         code: item.code,
         orderId: item.orderId,
         warningSuffix: item.warningSuffix,
-        liffId,
         cardIndex: item.cardIndex || idx + 1,
         totalCards: matchedItems.length,
         source: 'filter'

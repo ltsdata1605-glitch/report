@@ -16,7 +16,6 @@ import { onRequest } from 'firebase-functions/v2/https';
 import { db } from './firebaseAdmin';
 import { FieldValue } from 'firebase-admin/firestore';
 import { createFilteredPmhFlexMessages } from './pmhFlexCard';
-import { signLiffUris } from './liffTicket';
 import { allocatePmhSequence } from './pmhSequence';
 
 const REGION = 'asia-southeast1';
@@ -139,7 +138,6 @@ export const pmhRelayComplete = onRequest({ region: REGION, cors: true }, async 
     const botDoc = await db.collection('line_bots').doc(uid).get();
     const botData = await withSecrets(uid, botDoc.data());
     const token = botData?.channelAccessToken;
-    const liffId = botData?.liffId || '2011679071-BclvutpD';
     if (!token || !data.groupId) {
         res.json({ ok: true, pushed: false, reason: 'no-token-or-group' });
         return;
@@ -206,7 +204,7 @@ async function saveQuoteTokens(
                 cardIndex: (startSeq && startSeq > 0) ? startSeq + idx : (idx + 1),
             };
         });
-        messages = signLiffUris(createFilteredPmhFlexMessages(matchedItems, liffId), uid, botData?.channelSecret);
+        messages = createFilteredPmhFlexMessages(matchedItems);
 
         // Lưu vào kho filtered_coupons (kho CSD) để hỗ trợ lệnh "csd" và ghi nhận lịch sử LIFF khi bấm copy
         try {
