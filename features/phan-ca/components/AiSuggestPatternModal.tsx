@@ -10,6 +10,7 @@ import { getErrorMessage } from '../../../utils/dataUtils';
 import { useAuth } from '../../../contexts/AuthContext';
 import { HOURS_CONFIG, KHO_TN_MIN_GAP_DAYS, GH_MIN_GAP_DAYS } from '../constants';
 import { suggestShiftPattern } from '../services/geminiService';
+import { generateDeterministicPattern } from '../utils/scheduleUtils';
 
 interface AiSuggestPatternModalProps {
   onClose: () => void;
@@ -278,6 +279,28 @@ Hãy trả về kết quả dưới dạng JSON với định dạng sau:
         }
     }, [functions, departmentName, numNam, numNu, maxHours, commonShifts, slotRequirements, specialShifts, hourConfig, checkFeasibility]);
 
+    const handleGenerateDeterministic = useCallback(() => {
+        setError(null);
+        setSuggestion(null);
+        setFeasibilityWarnings([]);
+
+        const totalStaff = numNam + numNu;
+        const codes = commonShifts.split(',').map(s => s.trim()).filter(Boolean);
+        if (totalStaff <= 0 || codes.length === 0) {
+            setError('Cần nhập số nhân sự và danh sách ca thường dùng.');
+            return;
+        }
+
+        const result = generateDeterministicPattern(totalStaff, slotRequirements, codes, maxHours);
+        if (result.length === 0) {
+            setError('Không thể sinh mẫu ca — kiểm tra lại danh sách ca thường dùng.');
+            return;
+        }
+
+        setSuggestion(result);
+        setFeasibilityWarnings(checkFeasibility(result));
+    }, [numNam, numNu, commonShifts, slotRequirements, maxHours, checkFeasibility]);
+
     const renderSpecialShiftConfig = (role: SpecialShiftRole, title: string) => (
         <div className="p-3 bg-white dark:bg-slate-800 rounded-control border border-slate-200 dark:border-slate-700">
             <h4 className="font-bold text-slate-700 dark:text-slate-300 mb-2">{title}</h4>
@@ -320,11 +343,12 @@ Hãy trả về kết quả dưới dạng JSON với định dạng sau:
             onClose={onClose}
             zIndex="z-[70]"
             maxWidth="xl"
-            title={<>Gợi Ý Ca Xoay Bằng AI cho <span className="text-sky-600 dark:text-sky-400">{departmentName}</span></>}
+            title={<>Gợi Ý Ca Xoay cho <span className="text-sky-600 dark:text-sky-400">{departmentName}</span></>}
             footer={
                 <div className="flex justify-end gap-3">
                     <Button variant="secondary" onClick={onClose}>Hủy</Button>
-                    <Button onClick={handleGenerate} isLoading={isLoading}>Tạo Gợi Ý</Button>
+                    <Button variant="secondary" onClick={handleGenerateDeterministic}>Tạo Nhanh</Button>
+                    <Button onClick={handleGenerate} isLoading={isLoading}>Tạo Gợi Ý AI</Button>
                     <Button
                         onClick={() => suggestion && onApply(suggestion)}
                         disabled={!suggestion || isLoading}

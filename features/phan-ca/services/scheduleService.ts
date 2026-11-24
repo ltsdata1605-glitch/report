@@ -85,6 +85,19 @@ function generateSchedule(
     }
 
     // B1: Gán ca cơ bản theo Pattern
+    // Khi nhân viên báo bận sáng/chiều mà ca gốc xung đột, tìm ca thay thế từ pattern
+    // thay vì cho nghỉ cả ngày (giữ sức lao động).
+    const findAlternateShift = (staffPattern: string[], busyStatus: 'morning' | 'afternoon'): string | null => {
+        const isBusyMorning = busyStatus === 'morning';
+        for (const code of staffPattern) {
+            const hasMorning = morningRegex.test(code);
+            const hasAfternoon = afternoonRegex.test(code);
+            if (isBusyMorning && hasAfternoon && !hasMorning) return code;
+            if (!isBusyMorning && hasMorning && !hasAfternoon) return code;
+        }
+        return null;
+    };
+
     staffList.forEach((staff: StaffMember, staffIndex: number) => {
         const staffPattern = departmentPatterns[staff.department] || [];
         const patternLength = staffPattern.length;
@@ -98,13 +111,18 @@ function generateSchedule(
                 staff.schedule[d] = { shift: '', role: '' };
                 continue;
             }
-            let patternIndex = (staffIndex + d) % patternLength; 
-            let rawShift = staffPattern[patternIndex];
+            const patternIndex = (staffIndex + d) % patternLength;
+            const rawShift = staffPattern[patternIndex];
             const isMorningShift = morningRegex.test(rawShift);
             const isAfternoonShift = afternoonRegex.test(rawShift);
             const hasConflict = (busyStatus === 'morning' && isMorningShift) || (busyStatus === 'afternoon' && isAfternoonShift);
             if (hasConflict) {
-                staff.schedule[d] = { shift: 'OFF', role: 'OFF' };
+                const alt = findAlternateShift(staffPattern, busyStatus);
+                if (alt) {
+                    staff.schedule[d] = { shift: alt, role: alt };
+                } else {
+                    staff.schedule[d] = { shift: 'OFF', role: 'OFF' };
+                }
             } else {
                 staff.schedule[d] = { shift: rawShift, role: rawShift };
             }

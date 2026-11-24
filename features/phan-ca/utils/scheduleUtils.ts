@@ -1069,6 +1069,134 @@ export const autoRefineSchedule = (staffList: StaffMember[], config: ScheduleCon
     };
     balanceTotalWorkHours();
 
+    /**
+     * BƯỚC MỚI: TINH CHỈNH HỢP NHẤT (UNIFIED SCORING)
+     * Thay vì các pass tuần tự triệt tiêu nhau, bước này dùng MỘT hàm đánh giá tổng hợp.
+     * Mỗi lượt đổi chỉ được chấp nhận nếu điểm tổng thể giảm (tốt hơn).
+     * Chạy đến khi hội tụ (không tìm được swap nào cải thiện).
+     */
+    const unifiedScoringPass = () => {
+        const W_GH_COUNT = 20;
+        const W_KHO_COUNT = 15;
+        const W_SBH_HOURS = 10;
+        const W_SPACING = 25;
+        const W_WEEKEND = 8;
+        const W_TOTAL_HOURS = 5;
+
+        const stdDev = (values: number[]) => {
+            if (values.length < 2) return 0;
+            const mean = values.reduce((a, b) => a + b, 0) / values.length;
+            return Math.sqrt(values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length);
+        };
+
+        const countSpacingViolations = () => {
+            let violations = 0;
+            for (const staff of allInOneStaff) {
+                for (let d = 1; d <= duration; d++) {
+                    const s = staff.schedule[d];
+                    if (!s || !isSpecial(s)) continue;
+                    const roleTag = s.role.match(/\(([^)]+)\)/)?.[1];
+                    const gap = roleTag === 'GH' ? GH_MIN_GAP : MIN_GAP;
+                    for (let k = 1; k <= gap; k++) {
+                        const next = staff.schedule[d + k];
+                        if (next?.role.includes(`(${roleTag})`)) violations++;
+                    }
+                    if (d + 1 <= duration && isSpecial(staff.schedule[d + 1])) violations++;
+                }
+            }
+            return violations;
+        };
+
+        const countWeekendSpecialPerStaff = () =>
+            allInOneStaff.map(s => {
+                let c = 0;
+                for (let d = 1; d <= duration; d++) if (isWeekendDay(d) && isSpecial(s.schedule[d])) c++;
+                return c;
+            });
+
+        const computeScore = () => {
+            refreshAllStats();
+            const nams = allInOneStaff.filter(s => s.gender === 'Nam');
+            const nus = allInOneStaff.filter(s => s.gender === 'Nu');
+
+            const ghCounts = nams.map(s => s.stats.gh);
+            const khoCountsNam = nams.map(s => s.stats.kho);
+            const khoCountsNu = nus.map(s => s.stats.kho);
+            const sbhHours = allInOneStaff.map(s => calculateSpecialHours(s, includeTn));
+            const totalHours = allInOneStaff.map(s => calculateTotalHours(s));
+            const weekendSpecial = countWeekendSpecialPerStaff();
+
+            return (
+                W_GH_COUNT * stdDev(ghCounts) +
+                W_KHO_COUNT * (stdDev(khoCountsNam) + stdDev(khoCountsNu)) +
+                W_SBH_HOURS * stdDev(sbhHours) +
+                W_SPACING * countSpacingViolations() +
+                W_WEEKEND * stdDev(weekendSpecial) +
+                W_TOTAL_HOURS * stdDev(totalHours)
+            );
+        };
+
+        let currentScore = computeScore();
+
+        for (let pass = 0; pass < 40; pass++) {
+            let improved = false;
+            refreshAllStats();
+
+            for (let i = 0; i < allInOneStaff.length && !improved; i++) {
+                for (let j = i + 1; j < allInOneStaff.length && !improved; j++) {
+                    const sA = allInOneStaff[i];
+                    const sB = allInOneStaff[j];
+
+                    for (let d = 1; d <= duration; d++) {
+                        const aS = sA.schedule[d];
+                        const bS = sB.schedule[d];
+                        if (!aS || !bS) continue;
+                        if (aS.role === 'OFF' || bS.role === 'OFF') continue;
+
+                        const aIsSpecial = isSpecial(aS);
+                        const bIsSpecial = isSpecial(bS);
+                        if (aIsSpecial === bIsSpecial) continue;
+
+                        const specialStaff = aIsSpecial ? sA : sB;
+                        const normalStaff = aIsSpecial ? sB : sA;
+                        const specialSched = aIsSpecial ? aS : bS;
+                        const normalSched = aIsSpecial ? bS : aS;
+
+                        if (normalSched.role.includes('(')) continue;
+
+                        const roleTag = specialSched.role.match(/\(([^)]+)\)/)?.[1];
+                        if (!roleTag) continue;
+
+                        if (roleTag === 'GH' && normalStaff.gender !== 'Nam') continue;
+                        if (roleTag === 'Kho' && specialStaff.gender !== normalStaff.gender) continue;
+
+                        const isSafe = roleTag === 'Kho'
+                            ? isSafeForKho(normalStaff, d)
+                            : isSafeForSpecial(normalStaff, d, undefined, roleTag);
+                        if (!isSafe) continue;
+
+                        const origSpecial = { ...specialSched };
+                        const origNormal = { ...normalSched };
+                        specialStaff.schedule[d] = { shift: normalSched.shift, role: normalSched.shift };
+                        normalStaff.schedule[d] = { shift: specialSched.shift, role: `${specialSched.shift} (${roleTag})` };
+
+                        const newScore = computeScore();
+                        if (newScore < currentScore - 0.1) {
+                            currentScore = newScore;
+                            improved = true;
+                        } else {
+                            specialStaff.schedule[d] = origSpecial;
+                            normalStaff.schedule[d] = origNormal;
+                        }
+                    }
+                }
+            }
+            if (!improved) break;
+        }
+    };
+
+    unifiedScoringPass();
+
     // APPLY NEXT-DAY 56/456 RULE FOR GIAO HÀNG (GH) SHIFTS
     refinedList.forEach((staff: StaffMember) => {
         for (let d = 1; d < duration; d++) {
@@ -1257,6 +1385,124 @@ export const findAutomaticReplacement = (shiftToCover: string, dayIndex: number,
         return findSplitCover(remainingPartners, required);
     };
     return findSplitCover(potentialPartners, vacantDigits);
+};
+
+/**
+ * Sinh mẫu Ca Xoay xác định dựa trên yêu cầu nhân sự/ca — thay thế/bổ sung cho gợi ý AI.
+ *
+ * Thuật toán:
+ * 1. Tính số lần mỗi slot (1-6) cần xuất hiện trong pattern để đáp ứng yêu cầu
+ * 2. Chọn tổ hợp mã ca từ danh sách thường dùng bằng greedy bin-packing
+ * 3. Sắp xếp xen kẽ sáng → chiều → full để đa dạng lịch xoay
+ *
+ * @param totalStaff Tổng số nhân viên trong bộ phận
+ * @param requirements Yêu cầu nhân sự tối thiểu/ca (slot 1-6)
+ * @param commonShiftCodes Danh sách mã ca được phép dùng (vd ["123","456","2345","23","45"])
+ * @param maxHoursPerMonth Giờ công tối đa/tháng (mặc định 208)
+ * @returns Mảng mã ca tạo thành chu kỳ xoay
+ */
+export const generateDeterministicPattern = (
+    totalStaff: number,
+    requirements: { [slot: string]: number },
+    commonShiftCodes: string[],
+    maxHoursPerMonth: number = 208
+): string[] => {
+    if (totalStaff <= 0 || commonShiftCodes.length === 0) return [];
+
+    const patternLength = Math.max(1, Math.ceil(totalStaff / 2));
+    const validCodes = commonShiftCodes.filter(c => /^\d+$/.test(c.trim())).map(c =>
+        c.trim().split('').sort().join('')
+    );
+    if (validCodes.length === 0) return [];
+
+    // Mỗi slot cần xuất hiện bao nhiêu lần trong pattern
+    const slotTarget: { [slot: string]: number } = {};
+    for (const slot of ['1', '2', '3', '4', '5', '6']) {
+        const req = requirements[slot] || 0;
+        slotTarget[slot] = req > 0 ? Math.ceil((req * patternLength) / totalStaff) : 0;
+    }
+
+    // Phân loại mã ca
+    const classify = (code: string): 'morning' | 'afternoon' | 'full' => {
+        const hasMorning = /[123]/.test(code);
+        const hasAfternoon = /[456]/.test(code);
+        if (hasMorning && hasAfternoon) return 'full';
+        if (hasAfternoon) return 'afternoon';
+        return 'morning';
+    };
+
+    // Giờ công của 1 mã ca
+    const codeHours = (code: string) => code.split('').reduce((s, c) => s + (HOURS_CONFIG[c] || 0), 0);
+
+    // Giờ công trung bình/ngày tối đa (30 ngày/tháng)
+    const maxAvgHoursPerDay = maxHoursPerMonth / 30;
+
+    // Greedy: lặp lại cho đến đủ patternLength, mỗi lượt chọn mã ca bù thiếu nhiều nhất
+    const pattern: string[] = [];
+    const slotFilled: { [slot: string]: number } = { '1': 0, '2': 0, '3': 0, '4': 0, '5': 0, '6': 0 };
+
+    for (let i = 0; i < patternLength; i++) {
+        let bestCode = validCodes[0];
+        let bestScore = -Infinity;
+
+        for (const code of validCodes) {
+            let score = 0;
+            for (const ch of code) {
+                const deficit = (slotTarget[ch] || 0) - (slotFilled[ch] || 0);
+                score += deficit > 0 ? deficit * 10 : deficit;
+            }
+            // Phạt nếu giờ công trung bình vượt mức
+            const totalHoursSoFar = pattern.reduce((s, c) => s + codeHours(c), 0) + codeHours(code);
+            const avgSoFar = totalHoursSoFar / (i + 1);
+            if (avgSoFar > maxAvgHoursPerDay) score -= (avgSoFar - maxAvgHoursPerDay) * 5;
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestCode = code;
+            }
+        }
+
+        pattern.push(bestCode);
+        for (const ch of bestCode) {
+            slotFilled[ch] = (slotFilled[ch] || 0) + 1;
+        }
+    }
+
+    // Sắp xếp xen kẽ: sáng → chiều → full → sáng → chiều → ...
+    const mornings: string[] = [];
+    const afternoons: string[] = [];
+    const fulls: string[] = [];
+    for (const code of pattern) {
+        const type = classify(code);
+        if (type === 'morning') mornings.push(code);
+        else if (type === 'afternoon') afternoons.push(code);
+        else fulls.push(code);
+    }
+
+    const interleaved: string[] = [];
+    let mi = 0, ai = 0, fi = 0;
+    const groups = [mornings, afternoons, fulls];
+    let gi = 0;
+    while (interleaved.length < patternLength) {
+        let added = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const idx = (gi + attempt) % 3;
+            const group = groups[idx];
+            const ptr = idx === 0 ? mi : idx === 1 ? ai : fi;
+            if (ptr < group.length) {
+                interleaved.push(group[ptr]);
+                if (idx === 0) mi++;
+                else if (idx === 1) ai++;
+                else fi++;
+                added = true;
+                gi = idx + 1;
+                break;
+            }
+        }
+        if (!added) break;
+    }
+
+    return interleaved;
 };
 
 export const generateBalancingFeedback = (currentStats: MonthlyStats, previousStats: MonthlyStats): BalancingFeedback => {

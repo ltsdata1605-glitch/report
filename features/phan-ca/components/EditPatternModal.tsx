@@ -100,11 +100,11 @@ const EditPatternModal: React.FC<EditPatternModalProps> = ({ currentPatterns, al
     }
 
     const pattern = patternsByDept[selectedDept] || [];
-    const numStaff = pattern.length; // Logic mới: Tính toán dựa trên số dòng (chu kỳ) của mẫu ca
+    const actualStaffCount = staffCountByDept[selectedDept] || 0;
 
     const defaultStats: PreviewStats = { '1': 0, '2': 0, '3': 0, '4': 0, '5': 0, '6': 0, totalHours: 0 };
 
-    if (numStaff === 0) {
+    if (pattern.length === 0 || actualStaffCount === 0) {
       setPreviewStats(defaultStats);
       return;
     }
@@ -113,7 +113,6 @@ const EditPatternModal: React.FC<EditPatternModalProps> = ({ currentPatterns, al
     let totalHoursInPattern = 0;
 
     pattern.forEach(shiftCode => {
-      // Just check existence of digits for hours calculation
       const cleanStr = shiftCode.replace(/[^0-9]/g, '');
       for (const char of cleanStr) {
         if (shiftCounts[char] !== undefined) {
@@ -126,16 +125,16 @@ const EditPatternModal: React.FC<EditPatternModalProps> = ({ currentPatterns, al
     const avgStats: PreviewStats = { totalHours: 0 };
 
     Object.keys(shiftCounts).forEach(slot => {
-      const avg = (shiftCounts[slot] / pattern.length) * numStaff;
+      const avg = (shiftCounts[slot] / pattern.length) * actualStaffCount;
       avgStats[slot] = Math.round(avg);
     });
 
-    const avgTotalHoursPerDay = (totalHoursInPattern / pattern.length) * numStaff;
+    const avgTotalHoursPerDay = (totalHoursInPattern / pattern.length) * actualStaffCount;
     avgStats.totalHours = Math.round(avgTotalHoursPerDay);
 
     setPreviewStats(avgStats);
 
-  }, [patternsByDept, selectedDept]);
+  }, [patternsByDept, selectedDept, staffCountByDept]);
 
   const handleCheckboxChange = (patternIndex: number, shiftNumber: number) => {
     const shiftChar = String(shiftNumber);
